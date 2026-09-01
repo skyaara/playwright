@@ -80,6 +80,7 @@ export class WKPage implements PageDelegate {
   // until the popup page proxy arrives.
   private _nextWindowOpenPopupFeatures?: string[];
   private _screencastGeneration: number = 0;
+  private _screencastClockOffset: number | undefined;
 
   constructor(browserContext: WKBrowserContext, pageProxySession: WKSession, opener: WKPage | null) {
     this._pageProxySession = pageProxySession;
@@ -956,10 +957,12 @@ export class WKPage implements PageDelegate {
   private _onScreencastFrame(event: Protocol.Screencast.screencastFramePayload) {
     const generation = this._screencastGeneration;
     const buffer = Buffer.from(event.data, 'base64');
+    // Anchor the browser's monotonic timestamp to wall time at the first frame.
+    const monotonicTimestamp = event.timestamp * 1000;
+    this._screencastClockOffset ??= Date.now() - monotonicTimestamp;
     void this._page.screencast.onScreencastFrame({
       buffer,
-      // timestamp is in seconds, we need to convert to milliseconds.
-      frameSwapWallTime: event.timestamp * 1000,
+      frameSwapWallTime: monotonicTimestamp + this._screencastClockOffset,
       viewportWidth: event.deviceWidth,
       viewportHeight: event.deviceHeight,
     }).then(() => {
