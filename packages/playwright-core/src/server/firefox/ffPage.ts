@@ -57,6 +57,7 @@ export class FFPage implements PageDelegate {
   private _initScripts: { initScript: InitScript, worldName?: string }[] = [];
   private _webSocketRequests = new Map<string, { url: string, headers: types.HeadersArray }>();
   private _webSocketResponses = new Map<string, { status: number, statusText: string, headers: types.HeadersArray }>();
+  private _screencastClockOffset: number | undefined;
 
   constructor(session: FFSession, browserContext: FFBrowserContext, opener: FFPage | null) {
     this._session = session;
@@ -550,9 +551,12 @@ export class FFPage implements PageDelegate {
 
   private _onScreencastFrame(event: Protocol.Page.screencastFramePayload) {
     const buffer = Buffer.from(event.data, 'base64');
+    // Anchor the browser's monotonic timestamp to wall time at the first frame.
+    const monotonicTimestamp = event.timestamp * 1000;
+    this._screencastClockOffset ??= Date.now() - monotonicTimestamp;
     void this._page.screencast.onScreencastFrame({
       buffer,
-      frameSwapWallTime: event.timestamp * 1000, // timestamp is in seconds, we need to convert to milliseconds.
+      frameSwapWallTime: monotonicTimestamp + this._screencastClockOffset,
       viewportWidth: event.deviceWidth,
       viewportHeight: event.deviceHeight,
     }).then(() => {

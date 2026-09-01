@@ -105,8 +105,9 @@ class FfmpegVideoRecorder {
   private _lastWriteNodeTime: number = 0;
   private _isStopped = false;
   private _ffmpegPath: string;
-  private _launchPromise: Promise<Error | null>;
+  private _launchPromise: Promise<Error | null> | undefined;
   private _outputFile: string;
+  private _videoFilterArgs: string;
 
   constructor(ffmpegPath: string, size: types.Size, outputFile: string, page: PageDelegate) {
     if (!outputFile.endsWith('.webm'))
@@ -114,10 +115,12 @@ class FfmpegVideoRecorder {
     this._outputFile = outputFile;
     this._ffmpegPath = ffmpegPath;
     this._size = size;
-    this._launchPromise = this._launch(page).catch(e => e);
+    this._videoFilterArgs = page.getFFmpegVideoFilterArgs?.(size) ?? `pad=${size.width}:${size.height}:0:0:gray,crop=${size.width}:${size.height}:0:0`;
   }
 
-  private async _launch(page: PageDelegate) {
+  private async _launch(timestamp: number) {
+    this._firstFrameTimestamp = timestamp;
+    const firstFrameWallTime = new Date(timestamp * 1000).toISOString();
     await mkdirIfNeeded(this._outputFile);
     // How to tune the codec:
     // 1. Read vp8 documentation to figure out the options.
@@ -161,15 +164,30 @@ class FfmpegVideoRecorder {
     // "-threads 1" means using one thread. This drastically reduces stalling when
     //   cpu is overbooked. By default vp8 tries to use all available threads?
 
-    const w = this._size.width;
-    const h = this._size.height;
-    const videoFilterArgs = page.getFFmpegVideoFilterArgs?.({ width: w, height: h }) ?? `pad=${w}:${h}:0:0:gray,crop=${w}:${h}:0:0`;
-    const args = `-loglevel error -f matroska -fpsprobesize 0 -probesize 32 -analyzeduration 0 -i pipe:0 -y -an -r ${fps} -c:v vp8 -qmin 0 -qmax 50 -crf 8 -deadline realtime -speed 8 -b:v 1M -threads 1 -vf ${videoFilterArgs}`.split(' ');
-    args.push(this._outputFile);
-
     const { launchedProcess, gracefullyClose } = await launchProcess({
       command: this._ffmpegPath,
-      args,
+      args: [
+        '-loglevel', 'error',
+        '-f', 'matroska',
+        '-fpsprobesize', '0',
+        '-probesize', '32',
+        '-analyzeduration', '0',
+        '-i', 'pipe:0',
+        '-y',
+        '-an',
+        '-r', String(fps),
+        '-c:v', 'vp8',
+        '-qmin', '0',
+        '-qmax', '50',
+        '-crf', '8',
+        '-deadline', 'realtime',
+        '-speed', '8',
+        '-b:v', '1M',
+        '-threads', '1',
+        '-vf', this._videoFilterArgs,
+        '-metadata', `creation_time=${firstFrameWallTime}`,
+        this._outputFile,
+      ],
       stdio: 'stdin',
       log: (message: string) => debugLogger.log('browser', message),
       tempDirectories: [],
@@ -193,6 +211,7 @@ class FfmpegVideoRecorder {
   }
 
   writeFrame(frame: Buffer, timestamp: number) {
+    this._launchPromise ||= this._launch(timestamp).catch(e => e);
     this._launchPromise.then(error => {
       if (error)
         return;
@@ -204,9 +223,6 @@ class FfmpegVideoRecorder {
     assert(this._process);
     if (this._isStopped)
       return;
-
-    if (!this._firstFrameTimestamp)
-      this._firstFrameTimestamp = timestamp;
 
     const frameNumber = Math.floor((timestamp - this._firstFrameTimestamp) * fps);
     if (this._lastFrame && frameNumber !== this._lastFrame.frameNumber)
@@ -224,15 +240,13 @@ class FfmpegVideoRecorder {
 
   async _stop() {
     // Only report the error on stop. This allows to make the constructor synchronous.
-    const error = await this._launchPromise;
+    if (!this._launchPromise)
+      this.writeFrame(createWhiteImage(this._size.width, this._size.height), Date.now() / 1000);
+    const error = await this._launchPromise!;
     if (error)
       throw error;
     if (this._isStopped)
       return;
-    if (!this._lastFrame) {
-      // ffmpeg only creates a file upon some non-empty input.
-      this._writeFrame(createWhiteImage(this._size.width, this._size.height), monotonicTime() / 1000);
-    }
     // Emit the last received frame at its own slot, then repeat it at the end so it stays visible
     // for at least 1s. This also ensures non-empty videos with 1 frame and gives the output stream
     // a final timestamp.

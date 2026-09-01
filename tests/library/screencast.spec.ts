@@ -201,6 +201,39 @@ test('start/stop twice without path creates two files in artifactsDir', async ({
   await browser.close();
 });
 
+test('records first frame wall-clock time in video metadata', async ({ browser }, testInfo) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const videoPath = testInfo.outputPath('video.webm');
+  const recordingStartedAt = Date.now();
+  let firstFrameTimestamp: number | undefined;
+  let firstFrameReceivedCallback: () => void;
+  const firstFrameReceived = new Promise<void>(f => firstFrameReceivedCallback = f);
+  await page.screencast.start({
+    path: videoPath,
+    onFrame: ({ timestamp }) => {
+      if (firstFrameTimestamp !== undefined)
+        return;
+      firstFrameTimestamp = timestamp;
+      firstFrameReceivedCallback();
+    },
+  });
+  await page.evaluate(() => document.body.style.backgroundColor = 'red');
+  await firstFrameReceived;
+  const firstFrameReceivedAt = Date.now();
+  await page.screencast.stop();
+
+  const videoPlayer = new VideoPlayer(videoPath);
+  const creationTime = videoPlayer.output.match(/^\s+creation_time\s*:\s*(.+)$/m)?.[1];
+  await context.close();
+
+  expect(creationTime).toBeTruthy();
+  const creationTimeMs = Date.parse(creationTime!);
+  expect(creationTimeMs).toBeGreaterThanOrEqual(recordingStartedAt);
+  expect(creationTimeMs).toBeLessThanOrEqual(firstFrameReceivedAt);
+  expect(Math.abs(creationTimeMs - firstFrameTimestamp!)).toBeLessThanOrEqual(1);
+});
+
 test('start should work when recordVideo is set', async ({ browser }, testInfo) => {
   test.slow();
 
